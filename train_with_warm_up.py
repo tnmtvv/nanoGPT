@@ -28,7 +28,6 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
-from CsvLogger import CsvLogger
 
 site_packages_path = '/opt/miniconda3/envs/nanogpt_python39/lib/python3.9/site-packages'
 
@@ -36,158 +35,57 @@ site_packages_path = '/opt/miniconda3/envs/nanogpt_python39/lib/python3.9/site-p
 if site_packages_path not in sys.path:
     sys.path.insert(0, site_packages_path)
 
-from adagram_optimizers.AdagramPS import AdaGramPS
+# from adagram_optimizers import AdamAdagram
 
 
 from model import GPTConfig, GPT
-import argparse
 
-
-
-# Create argument parser
-parser = argparse.ArgumentParser(description='Train a GPT model')
-
-# I/O arguments
-parser.add_argument('--config', type=str, default='config', help='Config')
-parser.add_argument('--out_dir', type=str, default='out', help='Output directory')
-parser.add_argument('--eval_interval', type=int, default=2000, help='Evaluation interval')
-parser.add_argument('--log_interval', type=int, default=1, help='Logging interval')
-parser.add_argument('--eval_iters', type=int, default=200, help='Number of evaluation iterations')
-parser.add_argument('--eval_only', action='store_true', help='Exit after first eval')
-parser.add_argument('--always_save_checkpoint', action='store_true', help='Always save checkpoint after eval')
-parser.add_argument('--init_from', type=str, default='scratch', choices=['scratch', 'resume', 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], help='Initialize from scratch, resume, or pretrained')
-
-# Wandb logging
-parser.add_argument('--wandb_log', action='store_true', help='Enable wandb logging')
-parser.add_argument('--wandb_project', type=str, default='owt', help='Wandb project name')
-parser.add_argument('--wandb_run_name', type=str, default='gpt2', help='Wandb run name')
-
-# Data arguments
-parser.add_argument('--dataset', type=str, default='openwebtext', help='Dataset name')
-parser.add_argument('--gradient_accumulation_steps', type=int, default=40, help='Gradient accumulation steps')
-parser.add_argument('--batch_size', type=int, default=12, help='Batch size')
-parser.add_argument('--block_size', type=int, default=1024, help='Block size')
-
-# Model arguments
-parser.add_argument('--n_layer', type=int, default=12, help='Number of layers')
-parser.add_argument('--n_head', type=int, default=12, help='Number of attention heads')
-parser.add_argument('--n_embd', type=int, default=768, help='Embedding dimension')
-parser.add_argument('--dropout', type=float, default=0.0, help='Dropout rate')
-parser.add_argument('--bias', action='store_true', help='Use bias in LayerNorm and Linear layers')
-parser.add_argument('--seed', type=float, default=0.0, help='seed')
-
-# Optimizer arguments
-parser.add_argument('--optimizer_name', type=str, default="AdamW", help='optimizer choice')
-parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
-parser.add_argument('--max_iters', type=int, default=600000, help='Maximum iterations')
-parser.add_argument('--weight_decay', type=float, default=1e-1, help='Weight decay')
-parser.add_argument('--beta1', type=float, default=0.9, help='Adam beta1')
-parser.add_argument('--beta2', type=float, default=0.95, help='Adam beta2')
-parser.add_argument('--rank', type=int, default=1, help='Rank for low-rank optimizers')
-parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
-
-# Learning rate decay
-parser.add_argument('--decay_lr', action='store_true', default=True, help='Decay learning rate')
-parser.add_argument('--warmup_iters', type=int, default=2000, help='Warmup iterations')
-parser.add_argument('--lr_decay_iters', type=int, default=600000, help='LR decay iterations')
-parser.add_argument('--min_lr', type=float, default=6e-5, help='Minimum learning rate')
-
-# DDP arguments
-parser.add_argument('--backend', type=str, default='nccl', choices=['nccl', 'gloo'], help='DDP backend')
-
-# System arguments
-parser.add_argument('--device', type=str, default='cuda', help='Device (cuda, cpu, etc.)')
-parser.add_argument('--dtype', type=str, default='bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16', 
-                    choices=['float32', 'bfloat16', 'float16'], help='Data type')
-parser.add_argument('--compile', action='store_true', default=True, help='Compile model with PyTorch 2.0')
-# Parse arguments
-args = parser.parse_args()
-
-
-# Update global variables from parsed arguments
-out_dir = args.out_dir
-eval_interval = args.eval_interval
-log_interval = args.log_interval
-eval_iters = args.eval_iters
-eval_only = args.eval_only
-always_save_checkpoint = args.always_save_checkpoint
-init_from = args.init_from
-wandb_log = args.wandb_log
-wandb_project = args.wandb_project
-wandb_run_name = args.wandb_run_name
-dataset = args.dataset
-gradient_accumulation_steps = args.gradient_accumulation_steps
-batch_size = args.batch_size
-block_size = args.block_size
-n_layer = args.n_layer
-n_head = args.n_head
-n_embd = args.n_embd
-dropout = args.dropout
-bias = args.bias
-learning_rate = args.learning_rate
-max_iters = args.max_iters
-weight_decay = args.weight_decay
-beta1 = args.beta1
-beta2 = args.beta2
-rank = args.rank
-grad_clip = args.grad_clip
-decay_lr = args.decay_lr
-warmup_iters = args.warmup_iters
-lr_decay_iters = max_iters
-min_lr = args.min_lr
-backend = args.backend
-device = args.device
-dtype = args.dtype
-compile = args.compile
-optimizer_name = args.optimizer_name
-seed = args.seed
-
-
-# # -----------------------------------------------------------------------------
-# # default config values designed to train a gpt2 (124M) on OpenWebText
-# # I/O
-# out_dir = 'out'
-# eval_interval = 2000
-# log_interval = 1
-# eval_iters = 200
-# eval_only = False # if True, script exits right after the first eval
-# always_save_checkpoint = False # if True, always save a checkpoint after each eval
-# init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
-# # wandb logging
-# wandb_log = False # disabled by default
-# wandb_project = 'owt'
-# wandb_run_name = 'gpt2' # 'run' + str(time.time())
-# # data
-# dataset = 'openwebtext'
-# gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-# batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
-# block_size = 1024 
-# # model
-# n_layer = 12
-# n_head = 12
-# n_embd = 768
-# dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
-# bias = False # do we use bias inside LayerNorm and Linear layers?
-# # adamw optimizer
-# learning_rate = 6e-4 # max learning rate
-# max_iters = 600000 # total number of training iterations
-# weight_decay = 1e-1
-# beta1 = 0.9
-# beta2 = 0.95
-# rank = 1
-# grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
-# # learning rate decay settings
-# decay_lr = True # whether to decay the learning rate
-# warmup_iters = 2000 # how many steps to warm up for
-# lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
-# min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
-# # DDP settings
-# backend = 'nccl' # 'nccl', 'gloo', etc.
-# # system
-# device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-# dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-# compile = True # use PyTorch 2.0 to compile the model to be faster
-# # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# default config values designed to train a gpt2 (124M) on OpenWebText
+# I/O
+out_dir = 'out'
+eval_interval = 2000
+log_interval = 1
+eval_iters = 200
+eval_only = False # if True, script exits right after the first eval
+always_save_checkpoint = False # if True, always save a checkpoint after each eval
+init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+# wandb logging
+wandb_log = False # disabled by default
+wandb_project = 'owt'
+wandb_run_name = 'gpt2' # 'run' + str(time.time())
+# data
+dataset = 'openwebtext'
+gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 1024 
+# model
+n_layer = 12
+n_head = 12
+n_embd = 768
+dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
+bias = False # do we use bias inside LayerNorm and Linear layers?
+# adamw optimizer
+learning_rate_diag = 6e-4 # max learning rate
+learning_rate_full = 6e-4 # max learning rate
+max_iters = 600000 # total number of training iterations
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+rank = 1
+grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+# learning rate decay settings
+decay_lr = True # whether to decay the learning rate
+warmup_iters = 2000 # how many steps to warm up for
+lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# DDP settings
+backend = 'nccl' # 'nccl', 'gloo', etc.
+# system
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+compile = True # use PyTorch 2.0 to compile the model to be faster
+# -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
@@ -225,7 +123,7 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset + seed)
+torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
@@ -318,9 +216,10 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type, opt_name=optimizer_name)
+optimizer_adagram, optimizer_adamw = model.configure_warmup_optimizers(weight_decay, learning_rate_diag, learning_rate_full, (beta1, beta2), device_type, rank)
 if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
+    optimizer_adagram.load_state_dict(checkpoint['optimizer_adagram'])
+    optimizer_adamw.load_state_dict(checkpoint['optimizer_adamw'])
 checkpoint = None # free up memory
 
 # compile the model
@@ -350,10 +249,10 @@ def estimate_loss():
     return out
 
 # learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
+def get_lr(it, lr):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
+        return lr * (it + 1) / (warmup_iters + 1)
     # 2) if it > lr_decay_iters, return min learning rate
     if it > lr_decay_iters:
         return min_lr
@@ -361,15 +260,13 @@ def get_lr(it):
     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
+    return min_lr + coeff * (lr - min_lr)
 
 # logging
 if master_process:
     print("clearml init")
     from clearml import Task
     task = Task.init(project_name=wandb_project, task_name=wandb_run_name)
-    print(seed)
-    csv_logger = CsvLogger(opt_name=optimizer_name, bs=batch_size, lr=learning_rate, filename=f"out-{optimizer_name}-bs{batch_size}-lr{learning_rate}/log.csv", seed=seed)
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -378,9 +275,15 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 while True:
+    if iter_num < 1000:
+        optimizer = optimizer_adamw
+        lr = get_lr(iter_num, learning_rate_diag) if decay_lr else learning_rate_diag
+    else:
+        optimizer = optimizer_adagram
+        lr = learning_rate_full
 
     # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -395,10 +298,6 @@ while True:
             task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
             task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
             # Remove the redundant second part
-            csv_logger.report_scalar("train", "loss", losses['train'], iter_num)
-            csv_logger.report_scalar("val", "loss", losses['val'], iter_num)
-            csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
-            csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -466,3 +365,4 @@ if master_process:
 
 if ddp:
     destroy_process_group()
+
