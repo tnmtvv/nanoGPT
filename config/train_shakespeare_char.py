@@ -1,7 +1,7 @@
 # train a miniature character-level shakespeare model
 # good for debugging and playing on macbooks and such
 
-out_dir = 'out-hessian-debug_warmup'
+out_dir = 'out-shakespeare-char'
 eval_interval = 250 # keep frequent because we'll overfit
 eval_iters = 200
 log_interval = 10 # don't print too too often
@@ -10,13 +10,12 @@ log_interval = 10 # don't print too too often
 always_save_checkpoint = False
 
 wandb_log = False # override via command line if you like
-wandb_project = 'nanoGPT_opt'
+wandb_project = 'shakespeare-char'
+wandb_run_name = 'mini-gpt'
 
 dataset = 'shakespeare_char'
 gradient_accumulation_steps = 1
-# batch_size = 64
-batch_size_diag = 64
-# batch_size_full = 512
+batch_size = 64
 block_size = 256 # context of up to 256 previous characters
 
 # baby GPT model :)
@@ -25,8 +24,7 @@ n_head = 6
 n_embd = 384
 dropout = 0.2
 
-learning_rate_diag = 1e-3 # with baby networks can afford to go a bit higher
-# learning_rate_full = 1e-2 # with baby networks can afford to go a bit higher
+learning_rate = 1e-3 # with baby networks can afford to go a bit higher
 max_iters = 5000
 lr_decay_iters = 5000 # make equal to max_iters usually
 min_lr = 1e-4 # learning_rate / 10 usually
@@ -37,5 +35,3 @@ warmup_iters = 100 # not super necessary potentially
 # on macbook also add
 # device = 'cpu'  # run on cpu only
 # compile = False # do not torch compile the model
-
-

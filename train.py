@@ -37,9 +37,6 @@ site_packages_path = '/opt/miniconda3/envs/nanogpt_python39/lib/python3.9/site-p
 if site_packages_path not in sys.path:
     sys.path.insert(0, site_packages_path)
 
-from adagram_optimizers.AdagramPS import AdaGramPS
-
-
 from model import GPTConfig, GPT
 import argparse
 
@@ -483,25 +480,19 @@ while True:
                 task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
 
-            # Remove the redundant second part
-            # csv_logger.report_scalar("train", "loss", losses['train'], iter_num)
-            # csv_logger.report_scalar("val", "loss", losses['val'], iter_num)
-            # csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
-            # csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
-
-        # if (losses['val'] < best_val_loss) or always_save_checkpoint:
-        #     best_val_loss = losses['val']
-        #     if iter_num > 0:
-        #         checkpoint = {
-        #             'model': raw_model.state_dict(),
-        #             'optimizer': optimizer.state_dict(),
-        #             'model_args': model_args,
-        #             'iter_num': iter_num,
-        #             'best_val_loss': best_val_loss,
-        #             'config': config,
-        #         }
-        #         print(f"saving checkpoint to {out_dir}")
-        #         torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
+            if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
+                best_val_loss = metrics['val']['loss']
+                if iter_num > 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'model_args': model_args,
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                    }
+                    print(f"saving checkpoint to {out_dir}")
+                    torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 

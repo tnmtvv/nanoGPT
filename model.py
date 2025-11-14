@@ -288,15 +288,7 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        # fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        # use_fused = fused_available and device_type == 'cuda'
-        # extra_args = dict(fused=True) if use_fused else dict()
-        # optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        if opt_name == 'AdaGram':
-            optimizer = AdamGram(optim_groups, lr=learning_rate, max_rank=rank)
-        if opt_name == 'AdaGramEQ':
-            optimizer = AdaGramEQ(optim_groups, lr=learning_rate, max_rank=1, enable_logging=False)
+
         if opt_name == 'AdamW':
             fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device_type == 'cuda'
@@ -312,8 +304,6 @@ class GPT(nn.Module):
                 dict(params=nodecay_params, use_muon=False, lr=learning_rate, betas=betas, weight_decay=weight_decay),
             ]
             optimizer = MuonWithAuxAdam(param_groups)
-        # optimizer = AdagramAdam(optim_groups, lr=learning_rate, max_rank=rank)
-        # print(f"using fused AdamW: {use_fused}")
 
         return optimizer
 
