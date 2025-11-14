@@ -29,62 +29,122 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
 
+from metrics import compute_perplexity, compute_bits_per_character, compute_token_accuracy, compute_top_k_accuracy, compute_confidence_metrics
+
 site_packages_path = '/opt/miniconda3/envs/nanogpt_python39/lib/python3.9/site-packages'
 
 # Add this path to the Python's search paths if it's not already there
 if site_packages_path not in sys.path:
     sys.path.insert(0, site_packages_path)
 
-# from adagram_optimizers import AdamAdagram
+from adagram_optimizers.AdagramPS import AdaGramPS
 
 
 from model import GPTConfig, GPT
+import argparse
 
-# -----------------------------------------------------------------------------
-# default config values designed to train a gpt2 (124M) on OpenWebText
-# I/O
-out_dir = 'out'
-eval_interval = 2000
-log_interval = 1
-eval_iters = 200
-eval_only = False # if True, script exits right after the first eval
-always_save_checkpoint = False # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
-# wandb logging
-wandb_log = False # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2' # 'run' + str(time.time())
-# data
-dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024 
-# model
-n_layer = 12
-n_head = 12
-n_embd = 768
-dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
-bias = False # do we use bias inside LayerNorm and Linear layers?
-# adamw optimizer
-learning_rate_diag = 6e-4 # max learning rate
-learning_rate_full = 6e-4 # max learning rate
-max_iters = 600000 # total number of training iterations
-weight_decay = 1e-1
-beta1 = 0.9
-beta2 = 0.95
-rank = 1
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
-# learning rate decay settings
-decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
-# DDP settings
-backend = 'nccl' # 'nccl', 'gloo', etc.
-# system
-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = True # use PyTorch 2.0 to compile the model to be faster
+
+parser = argparse.ArgumentParser(description='Train a GPT model')
+
+# I/O arguments
+parser.add_argument('--config', type=str, default='config', help='Config')
+parser.add_argument('--out_dir', type=str, default='out', help='Output directory')
+parser.add_argument('--eval_interval', type=int, default=2000, help='Evaluation interval')
+parser.add_argument('--log_interval', type=int, default=1, help='Logging interval')
+parser.add_argument('--eval_iters', type=int, default=200, help='Number of evaluation iterations')
+parser.add_argument('--eval_only', action='store_true', help='Exit after first eval')
+parser.add_argument('--always_save_checkpoint', action='store_true', help='Always save checkpoint after eval')
+parser.add_argument('--init_from', type=str, default='scratch', choices=['scratch', 'resume', 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], help='Initialize from scratch, resume, or pretrained')
+
+# Wandb logging
+parser.add_argument('--wandb_log', action='store_true', help='Enable wandb logging')
+parser.add_argument('--wandb_project', type=str, default='owt', help='Wandb project name')
+parser.add_argument('--wandb_run_name', type=str, default='gpt2', help='Wandb run name')
+
+# Data arguments
+parser.add_argument('--dataset', type=str, default='openwebtext', help='Dataset name')
+parser.add_argument('--gradient_accumulation_steps', type=int, default=40, help='Gradient accumulation steps')
+parser.add_argument('--batch_size_diag', type=int, default=12, help='Batch size for diagonal case')
+parser.add_argument('--batch_size_full', type=int, default=12, help='Batch size for full preconditioner case')
+parser.add_argument('--block_size', type=int, default=1024, help='Block size')
+
+# Model arguments
+parser.add_argument('--n_layer', type=int, default=12, help='Number of layers')
+parser.add_argument('--n_head', type=int, default=12, help='Number of attention heads')
+parser.add_argument('--n_embd', type=int, default=768, help='Embedding dimension')
+parser.add_argument('--dropout', type=float, default=0.0, help='Dropout rate')
+parser.add_argument('--bias', action='store_true', help='Use bias in LayerNorm and Linear layers')
+parser.add_argument('--seed', type=float, default=0.0, help='seed')
+
+# Optimizer arguments
+parser.add_argument('--optimizer_name', type=str, default="AdamW", help='optimizer choice')
+parser.add_argument('--learning_rate_diag', type=float, default=6e-4, help='Learning rate')
+parser.add_argument('--learning_rate_full', type=float, default=6e-4, help='Learning rate')
+parser.add_argument('--max_iters', type=int, default=5000, help='Maximum iterations')
+parser.add_argument('--weight_decay', type=float, default=1e-1, help='Weight decay')
+parser.add_argument('--beta1', type=float, default=0.9, help='Adam beta1')
+parser.add_argument('--beta2', type=float, default=0.95, help='Adam beta2')
+parser.add_argument('--rank', type=int, default=1, help='Rank for low-rank optimizers')
+parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
+
+# Learning rate decay
+parser.add_argument('--decay_lr', action='store_true', default=True, help='Decay learning rate')
+parser.add_argument('--warmup_iters', type=int, default=2000, help='Warmup iterations')
+parser.add_argument('--lr_decay_iters', type=int, default=600000, help='LR decay iterations')
+parser.add_argument('--min_lr', type=float, default=6e-5, help='Minimum learning rate')
+
+# DDP arguments
+parser.add_argument('--backend', type=str, default='nccl', choices=['nccl', 'gloo'], help='DDP backend')
+
+# System arguments
+parser.add_argument('--device', type=str, default='cuda', help='Device (cuda, cpu, etc.)')
+parser.add_argument('--dtype', type=str, default='float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16', 
+                    choices=['float32', 'bfloat16', 'float16'], help='Data type')
+parser.add_argument('--compile', action='store_true', default=True, help='Compile model with PyTorch 2.0')
+# Parse arguments
+args = parser.parse_args()
+
+
+# Update global variables from parsed arguments
+out_dir = args.out_dir
+eval_interval = args.eval_interval
+log_interval = args.log_interval
+eval_iters = args.eval_iters
+eval_only = args.eval_only
+always_save_checkpoint = args.always_save_checkpoint
+init_from = args.init_from
+wandb_log = args.wandb_log
+wandb_project = args.wandb_project
+wandb_run_name = args.wandb_run_name
+dataset = args.dataset
+gradient_accumulation_steps = args.gradient_accumulation_steps
+batch_size_diag = args.batch_size_diag
+batch_size_full = args.batch_size_full
+block_size = args.block_size
+n_layer = args.n_layer
+n_head = args.n_head
+n_embd = args.n_embd
+dropout = args.dropout
+bias = args.bias
+learning_rate_diag = args.learning_rate_diag
+learning_rate_full = args.learning_rate_full
+max_iters = args.max_iters
+weight_decay = args.weight_decay
+beta1 = args.beta1
+beta2 = args.beta2
+rank = args.rank
+grad_clip = args.grad_clip
+decay_lr = args.decay_lr
+warmup_iters = args.warmup_iters
+lr_decay_iters = max_iters
+min_lr = args.min_lr
+backend = args.backend
+device = args.device
+dtype = args.dtype
+compile = args.compile
+optimizer_name = args.optimizer_name
+seed = args.seed
+
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -114,12 +174,12 @@ else:
     ddp_world_size = 1
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29501'
     os.environ['WORLD_SIZE'] = '1'
     os.environ['RANK'] = '0'
     dist.init_process_group(backend='nccl', init_method='env://')
-tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
-print(f"tokens per iteration will be: {tokens_per_iter:,}")
+# tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
+# print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
@@ -133,14 +193,14 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-def get_batch(split):
+def get_batch(split, dynamic_bs=64):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    ix = torch.randint(len(data) - block_size, (dynamic_bs,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
@@ -216,7 +276,9 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer_adagram, optimizer_adamw = model.configure_warmup_optimizers(weight_decay, learning_rate_diag, learning_rate_full, (beta1, beta2), device_type, rank)
+# optimizer_adagram, optimizer_adamw = model.configure_warmup_optimizers(weight_decay, learning_rate_diag, learning_rate_full, (beta1, beta2), device_type, rank)
+optimizer_adamw = model.configure_optimizers(weight_decay, learning_rate_diag, (beta1, beta2), device_type, opt_name='AdamW')
+optimizer_adagram = model.configure_optimizers(weight_decay, learning_rate_full, (beta1, beta2), device_type, opt_name='AdaGram')
 if init_from == 'resume':
     optimizer_adagram.load_state_dict(checkpoint['optimizer_adagram'])
     optimizer_adamw.load_state_dict(checkpoint['optimizer_adamw'])
@@ -248,6 +310,54 @@ def estimate_loss():
     model.train()
     return out
 
+@torch.no_grad()
+def estimate_loss_with_metrics(model, ctx):
+    """
+    Enhanced evaluation function that computes loss and additional metrics.
+    """
+    out = {}
+    model.eval()
+    
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        perplexities = torch.zeros(eval_iters)
+        token_accuracies = torch.zeros(eval_iters)
+        top5_accuracies = torch.zeros(eval_iters)
+        confidences = torch.zeros(eval_iters)
+        entropies = torch.zeros(eval_iters)
+        
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                logits, loss = model(X, Y)
+            
+            # Basic metrics
+            losses[k] = loss.item()
+            perplexities[k] = compute_perplexity(loss)
+            
+            # Accuracy metrics
+            token_accuracies[k] = compute_token_accuracy(logits, Y)
+            top5_accuracies[k] = compute_top_k_accuracy(logits, Y, k=5)
+            
+            # Confidence metrics
+            mean_conf, entropy = compute_confidence_metrics(logits)
+            confidences[k] = mean_conf
+            entropies[k] = entropy
+        
+        # Store all metrics
+        out[split] = {
+            'loss': losses.mean().item(),
+            'perplexity': perplexities.mean().item(),
+            'token_accuracy': token_accuracies.mean().item(),
+            'top5_accuracy': top5_accuracies.mean().item(),
+            'mean_confidence': confidences.mean().item(),
+            'entropy': entropies.mean().item(),
+            'bpc': compute_bits_per_character(losses.mean())
+        }
+    
+    model.train()
+    return out
+
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it, lr):
     # 1) linear warmup for warmup_iters steps
@@ -269,7 +379,7 @@ if master_process:
     task = Task.init(project_name=wandb_project, task_name=wandb_run_name)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = get_batch('train', batch_size_diag) # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -280,7 +390,24 @@ while True:
         lr = get_lr(iter_num, learning_rate_diag) if decay_lr else learning_rate_diag
     else:
         optimizer = optimizer_adagram
-        lr = learning_rate_full
+        lr = get_lr(iter_num, learning_rate_full) if decay_lr else learning_rate_full
+        # lr = learning_rate_full
+
+# X, Y = get_batch('train', batch_size) # fetch the very first batch
+# t0 = time.time()
+# local_iter_num = 0 # number of iterations in the lifetime of this process
+# raw_model = model.module if ddp else model # unwrap DDP container if needed
+# running_mfu = -1.0
+# while True:
+#     if iter_num < 1000:
+#         optimizer = optimizer_adamw
+#         print(learning_rate)
+#         lr = get_lr(iter_num, learning_rate) if decay_lr else learning_rate
+#     else:
+#         optimizer = optimizer_adamw
+#         print(learning_rate)
+#         lr = get_lr(iter_num, learning_rate) if decay_lr else learning_rate
+        # lr = learning_rate_full
 
     # determine and set the learning rate for this iteration
 
@@ -289,29 +416,53 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        print("logging")
-        if master_process:
-            task.get_logger().report_scalar("train_loss", "loss", losses['train'], iter_num)
-            task.get_logger().report_scalar("val_loss", "loss", losses['val'], iter_num)
-            task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
-            task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
-            # Remove the redundant second part
+        metrics = estimate_loss_with_metrics(model, ctx)
 
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+        # FIXED: Access nested dictionary values
+        print(f"step {iter_num}: train loss {metrics['train']['loss']:.4f}, val loss {metrics['val']['loss']:.4f}")
+        print(f"  train ppl: {metrics['train']['perplexity']:.4f}, val ppl: {metrics['val']['perplexity']:.4f}")
+        print("logging")
+
+        if master_process:
+            # Loss metrics
+            task.get_logger().report_scalar("loss", "train", metrics['train']['loss'], iter_num)
+            task.get_logger().report_scalar("loss", "val", metrics['val']['loss'], iter_num)
+
+            # Perplexity metrics - FIXED
+            try:
+                task.get_logger().report_scalar("perplexity", "train", metrics['train']['perplexity'], iter_num)
+                task.get_logger().report_scalar("perplexity", "val", metrics['val']['perplexity'], iter_num)
+            except Exception as e:
+                print(f"ERROR logging perplexity: {e}")
+            
+            try:
+                task.get_logger().report_scalar("token_accuracy", "train", metrics['train']['token_accuracy'], iter_num)
+                task.get_logger().report_scalar("token_accuracy", "val", metrics['val']['token_accuracy'], iter_num)
+            except Exception as e:
+                print(f"ERROR logging token_accuracy: {e}")
+            
+            try:
+                task.get_logger().report_scalar("top5_accuracy", "train", metrics['train']['top5_accuracy'], iter_num)
+                task.get_logger().report_scalar("top5_accuracy", "val", metrics['val']['top5_accuracy'], iter_num)
+            except Exception as e:
+                print(f"ERROR logging top5_accuracy: {e}")
+    
+                # Confidence - FIXED
+                task.get_logger().report_scalar("confidence", "train", metrics['train']['mean_confidence'], iter_num)
+                task.get_logger().report_scalar("confidence", "val", metrics['val']['mean_confidence'], iter_num)
+    
+                # Entropy - FIXED
+                task.get_logger().report_scalar("entropy", "train", metrics['train']['entropy'], iter_num)
+                task.get_logger().report_scalar("entropy", "val", metrics['val']['entropy'], iter_num)
+    
+                # Bits per character - FIXED
+                task.get_logger().report_scalar("bits_per_char", "train", metrics['train']['bpc'], iter_num)
+                task.get_logger().report_scalar("bits_per_char", "val", metrics['val']['bpc'], iter_num)
+    
+                # Learning rate and MFU
+                task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
+                task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+
     if iter_num == 0 and eval_only:
         break
 
@@ -328,7 +479,11 @@ while True:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        
+        if iter_num < 1000:
+            X, Y = get_batch('train', batch_size_diag)
+        else:
+            X, Y = get_batch('train', batch_size_full)
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -350,7 +505,10 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            if iter_num < 1000:
+                mfu = raw_model.estimate_mfu(batch_size_diag * gradient_accumulation_steps, dt)
+            else:
+                mfu = raw_model.estimate_mfu(batch_size_full * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1

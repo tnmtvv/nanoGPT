@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Define the grid search parameters
-BATCH_SIZES=(1 8 16 32 64)
+BATCH_SIZES=(128 256 512)
 LEARNING_RATES=(1e-5 1e-4 1e-3 1e-2)
 
 # The name of your template configuration file
-TEMPLATE_FILE="train_shakespeare_char.py"
+TEMPLATE_FILE="config/train_shakespeare_char.py"
 
 # Check if the template file exists
 if [ ! -f "$TEMPLATE_FILE" ]; then

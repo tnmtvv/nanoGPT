@@ -17,8 +17,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from adagram_optimizers.AdamGram import AdamGram
-from adagram_optimizers.AdagramAdam import AdagramAdam
-from adagram_optimizers.AdamAdagram import AdamAdagram
+from adagram_optimizers.AdaGram_eq import AdaGramEQ
+
 
 from muon import MuonWithAuxAdam
 
@@ -48,9 +48,10 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        # self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        self.flash = False
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        # self.flash = False
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -294,6 +295,8 @@ class GPT(nn.Module):
         # optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
         if opt_name == 'AdaGram':
             optimizer = AdamGram(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdaGramEQ':
+            optimizer = AdaGramEQ(optim_groups, lr=learning_rate, max_rank=1, enable_logging=False)
         if opt_name == 'AdamW':
             fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device_type == 'cuda'
@@ -321,17 +324,35 @@ class GPT(nn.Module):
         2. AdamW for <2D non-matrix parameters (e.g., biases, layernorms).
         """
 
-        optimizer_adagram = AdamGram(self.named_parameters(), lr=learning_rate_full, max_rank=rank)
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # optimizer_adagram = AdamGram(self.named_parameters(), lr=learning_rate_full, max_rank=rank)
         
         # 2. Create AdamW optimizer for non-matrix parameters
         # As per the original logic, weight decay is disabled for this group.
+
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer_adamw = torch.optim.AdamW(self.named_parameters(), lr=learning_rate_diag, betas=betas, **extra_args)
-    
+        optimizer_adamw = torch.optim.AdamW(optim_groups, lr=learning_rate_diag, betas=betas, **extra_args)
+        optimizer_adagram = torch.optim.AdamW(optim_groups, lr=learning_rate_diag, betas=betas, **extra_args)
+        
         # Return both optimizers
-        return optimizer_adagram, optimizer_adamw
+        return optimizer_adamw, optimizer_adagram
 
 
     def configure_two_optimizers(self, weight_decay, learning_rate, betas, device_type, rank=1):

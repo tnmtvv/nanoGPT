@@ -29,6 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
 from CsvLogger import CsvLogger
+from metrics import compute_perplexity, compute_bits_per_character, compute_token_accuracy, compute_top_k_accuracy, compute_confidence_metrics
 
 site_packages_path = '/opt/miniconda3/envs/nanogpt_python39/lib/python3.9/site-packages'
 
@@ -97,7 +98,7 @@ parser.add_argument('--backend', type=str, default='nccl', choices=['nccl', 'glo
 
 # System arguments
 parser.add_argument('--device', type=str, default='cuda', help='Device (cuda, cpu, etc.)')
-parser.add_argument('--dtype', type=str, default='bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16', 
+parser.add_argument('--dtype', type=str, default='float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16', 
                     choices=['float32', 'bfloat16', 'float16'], help='Data type')
 parser.add_argument('--compile', action='store_true', default=True, help='Compile model with PyTorch 2.0')
 # Parse arguments
@@ -216,7 +217,7 @@ else:
     ddp_world_size = 1
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29501'
     os.environ['WORLD_SIZE'] = '1'
     os.environ['RANK'] = '0'
     dist.init_process_group(backend='nccl', init_method='env://')
@@ -349,6 +350,54 @@ def estimate_loss():
     model.train()
     return out
 
+@torch.no_grad()
+def estimate_loss_with_metrics(model, ctx):
+    """
+    Enhanced evaluation function that computes loss and additional metrics.
+    """
+    out = {}
+    model.eval()
+    
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        perplexities = torch.zeros(eval_iters)
+        token_accuracies = torch.zeros(eval_iters)
+        top5_accuracies = torch.zeros(eval_iters)
+        confidences = torch.zeros(eval_iters)
+        entropies = torch.zeros(eval_iters)
+        
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                logits, loss = model(X, Y)
+            
+            # Basic metrics
+            losses[k] = loss.item()
+            perplexities[k] = compute_perplexity(loss)
+            
+            # Accuracy metrics
+            token_accuracies[k] = compute_token_accuracy(logits, Y)
+            top5_accuracies[k] = compute_top_k_accuracy(logits, Y, k=5)
+            
+            # Confidence metrics
+            mean_conf, entropy = compute_confidence_metrics(logits)
+            confidences[k] = mean_conf
+            entropies[k] = entropy
+        
+        # Store all metrics
+        out[split] = {
+            'loss': losses.mean().item(),
+            'perplexity': perplexities.mean().item(),
+            'token_accuracy': token_accuracies.mean().item(),
+            'top5_accuracy': top5_accuracies.mean().item(),
+            'mean_confidence': confidences.mean().item(),
+            'entropy': entropies.mean().item(),
+            'bpc': compute_bits_per_character(losses.mean())
+        }
+    
+    model.train()
+    return out
+
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -372,7 +421,7 @@ if master_process:
     csv_logger = CsvLogger(opt_name=optimizer_name, bs=batch_size, lr=learning_rate, filename=f"out-{optimizer_name}-bs{batch_size}-lr{learning_rate}/log.csv", seed=seed)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = get_batch('train', ) # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -386,33 +435,73 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        print("logging")
-        if master_process:
-            task.get_logger().report_scalar("train_loss", "loss", losses['train'], iter_num)
-            task.get_logger().report_scalar("val_loss", "loss", losses['val'], iter_num)
-            task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
-            task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
-            # Remove the redundant second part
-            csv_logger.report_scalar("train", "loss", losses['train'], iter_num)
-            csv_logger.report_scalar("val", "loss", losses['val'], iter_num)
-            csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
-            csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+        metrics = estimate_loss_with_metrics(model, ctx)
 
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+        # FIXED: Access nested dictionary values
+        print(f"step {iter_num}: train loss {metrics['train']['loss']:.4f}, val loss {metrics['val']['loss']:.4f}")
+        print(f"  train ppl: {metrics['train']['perplexity']:.4f}, val ppl: {metrics['val']['perplexity']:.4f}")
+        print("logging")
+
+        if master_process:
+            # Loss metrics
+            task.get_logger().report_scalar("loss", "train", metrics['train']['loss'], iter_num)
+            task.get_logger().report_scalar("loss", "val", metrics['val']['loss'], iter_num)
+
+            # Perplexity metrics - FIXED
+            try:
+                task.get_logger().report_scalar("perplexity", "train", metrics['train']['perplexity'], iter_num)
+                task.get_logger().report_scalar("perplexity", "val", metrics['val']['perplexity'], iter_num)
+            except Exception as e:
+                print(f"ERROR logging perplexity: {e}")
+            
+            try:
+                task.get_logger().report_scalar("token_accuracy", "train", metrics['train']['token_accuracy'], iter_num)
+                task.get_logger().report_scalar("token_accuracy", "val", metrics['val']['token_accuracy'], iter_num)
+            except Exception as e:
+                print(f"ERROR logging token_accuracy: {e}")
+            
+            try:
+                task.get_logger().report_scalar("top5_accuracy", "train", metrics['train']['top5_accuracy'], iter_num)
+                task.get_logger().report_scalar("top5_accuracy", "val", metrics['val']['top5_accuracy'], iter_num)
+            except Exception as e:
+                print(f"ERROR logging top5_accuracy: {e}")
+    
+                # Confidence - FIXED
+                task.get_logger().report_scalar("confidence", "train", metrics['train']['mean_confidence'], iter_num)
+                task.get_logger().report_scalar("confidence", "val", metrics['val']['mean_confidence'], iter_num)
+    
+                # Entropy - FIXED
+                task.get_logger().report_scalar("entropy", "train", metrics['train']['entropy'], iter_num)
+                task.get_logger().report_scalar("entropy", "val", metrics['val']['entropy'], iter_num)
+    
+                # Bits per character - FIXED
+                task.get_logger().report_scalar("bits_per_char", "train", metrics['train']['bpc'], iter_num)
+                task.get_logger().report_scalar("bits_per_char", "val", metrics['val']['bpc'], iter_num)
+    
+                # Learning rate and MFU
+                task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
+                task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+
+
+            # Remove the redundant second part
+            # csv_logger.report_scalar("train", "loss", losses['train'], iter_num)
+            # csv_logger.report_scalar("val", "loss", losses['val'], iter_num)
+            # csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
+            # csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+
+        # if (losses['val'] < best_val_loss) or always_save_checkpoint:
+        #     best_val_loss = losses['val']
+        #     if iter_num > 0:
+        #         checkpoint = {
+        #             'model': raw_model.state_dict(),
+        #             'optimizer': optimizer.state_dict(),
+        #             'model_args': model_args,
+        #             'iter_num': iter_num,
+        #             'best_val_loss': best_val_loss,
+        #             'config': config,
+        #         }
+        #         print(f"saving checkpoint to {out_dir}")
+        #         torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
