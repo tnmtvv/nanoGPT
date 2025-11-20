@@ -16,11 +16,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from adagram_optimizers.AdamGram import AdamGram
-from adagram_optimizers.AdaGram_eq import AdaGramEQ
-
-
-from muon import MuonWithAuxAdam
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -269,7 +264,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, opt_name='AdamW', rank=1):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, opt_name='AdamW'):
         # start with all of the candidate parameters
 
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -288,7 +283,11 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-
+        # Create AdamW optimizer and use the fused version if it is available
+        # fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        # use_fused = fused_available and device_type == 'cuda'
+        # extra_args = dict(fused=True) if use_fused else dict()
+        # optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
         if opt_name == 'AdamW':
             fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device_type == 'cuda'
@@ -298,19 +297,13 @@ class GPT(nn.Module):
             optimizer = torch.optim.SGD(optim_groups, lr=learning_rate)
         if opt_name == 'AdaGrad':
             optimizer = torch.optim.Adagrad(optim_groups, lr=learning_rate)
-        if opt_name == 'MuonWithAdamW':
-            param_groups = [
-                dict(params=decay_params, use_muon=True, lr=learning_rate, weight_decay=weight_decay),
-                dict(params=nodecay_params, use_muon=False, lr=learning_rate, betas=betas, weight_decay=weight_decay),
-            ]
-            optimizer = MuonWithAuxAdam(param_groups)
 
         return optimizer
 
-    def configure_warmup_optimizers(self, weight_decay, learning_rate_diag, learning_rate_full, betas, device_type, rank=1):
+    def configure_warmup_optimizers(self, weight_decay, learning_rate_first, learning_rate_second, betas, device_type):
         """
         Configures and returns two separate optimizers:
-        1. AdaGramPS for 2D+ matrix parameters.
+        1. SGD for 2D+ matrix parameters.
         2. AdamW for <2D non-matrix parameters (e.g., biases, layernorms).
         """
 
@@ -338,17 +331,17 @@ class GPT(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer_adamw = torch.optim.AdamW(optim_groups, lr=learning_rate_diag, betas=betas, **extra_args)
-        optimizer_adagram = torch.optim.AdamW(optim_groups, lr=learning_rate_diag, betas=betas, **extra_args)
-        
+        optimizer_adamw = torch.optim.AdamW(optim_groups, lr=learning_rate_first, betas=betas, **extra_args)
+        optimizer_sgd = torch.optim.SGD(optim_groups, lr=learning_rate_second)
+
         # Return both optimizers
-        return optimizer_adamw, optimizer_adagram
+        return optimizer_adamw, optimizer_sgd
 
 
-    def configure_two_optimizers(self, weight_decay, learning_rate, betas, device_type, rank=1):
+    def configure_two_optimizers(self, weight_decay, learning_rate, betas, device_type):
         """
         Configures and returns two separate optimizers:
-        1. AdaGramPS for 2D+ matrix parameters.
+        1. SGD for 2D+ matrix parameters.
         2. AdamW for <2D non-matrix parameters (e.g., biases, layernorms).
         """
         # Start with all of the candidate parameters that require gradients
@@ -364,48 +357,22 @@ class GPT(nn.Module):
         print(f"num matrix parameter tensors: {len(matrix_params)}, with {num_matrix_params:,} parameters")
         print(f"num non-matrix parameter tensors: {len(non_matrix_params)}, with {num_non_matrix_params:,} parameters")
     
-        # 1. Create AdaGramPS optimizer for matrix parameters
-        # The original weight_decay is applied to this group by default in many optimizers,
-        # but AdaGramPS does not have a standard 'weight_decay' argument.
-        # If your AdaGramPS implementation supports it, you can pass it here.
-        # We also apply the main learning rate to this group.
-        optimizer_adagram = AdamGram(matrix_params, lr=learning_rate, max_rank=rank)
-        
-        # 2. Create AdamW optimizer for non-matrix parameters
-        # As per the original logic, weight decay is disabled for this group.
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+
         optimizer_adamw = torch.optim.AdamW(
+            [{'params': non_matrix_params, 'weight_decay': 0.0}], 
+            lr=learning_rate, betas=betas, **extra_args)
+        
+        optimizer_sgd = torch.optim.SGD(
             [{'params': non_matrix_params, 'weight_decay': 0.0}], 
             lr=learning_rate,
         )
     
         # Return both optimizers
-        return optimizer_adagram, optimizer_adamw
+        return optimizer_sgd, optimizer_adamw
 
-    # def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-    #     # Gather all parameters that require gradients
-    #     param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        
-    #     # Separate parameters into matrix (dim >= 2) and non-matrix (dim < 2)
-    #     hidden_weights = [p for n, p in param_dict.items() if p.dim() >= 2]
-    #     hidden_gains_biases = [p for n, p in param_dict.items() if p.dim() < 2]
-    #     # Add other non-hidden params as needed; here assuming no extra groups
-    #     print("hidden_weights", len(hidden_weights))
-    #     print("hidden_gains_biases", len(hidden_gains_biases))
-
-    #     matrix_params= [p for n, p in param_dict.items() if p.dim() >= 2]
-    #     non_matrix_params = [p for n, p in param_dict.items() if p.dim() < 2]
-
-    #     # Define parameter groups for Muon and AdamW
-    #     param_groups = [
-    #         dict(params=hidden_weights, use_muon=True, lr=learning_rate, weight_decay=weight_decay),
-    #         dict(params=hidden_gains_biases, use_muon=False, lr=learning_rate, betas=betas, weight_decay=weight_decay),
-    #     ]
-        
-    #     # Create the combined MuonWithAuxAdam optimizer
-    #     optimizer = MuonWithAuxAdam(param_groups)
-        
-    #     print(f"Using Muon optimizer for matrix params and AdamW for others")
-    #     return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """

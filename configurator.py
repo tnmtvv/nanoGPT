@@ -6,10 +6,19 @@ argv = sys.argv[1:]
 
 # Process config file if provided as positional argument
 config_file = None
-for i, arg in enumerate(argv):
-    if arg == '--config' and i + 1 < len(argv):
-        config_file = argv[i + 1]
-        break
+
+if len(argv) > 0 and argv[0].endswith('.py') and not argv[0].startswith('--'):
+    config_file = argv[0]
+    argv = argv[1:]  # Remove config file from argv
+else:
+    for i, arg in enumerate(argv):
+        if arg == '--config' and i + 1 < len(argv):
+            config_file = argv[i + 1]
+            break
+        elif arg.startswith('--config='):
+            config_file = arg.split('=', 1)[1]
+            break
+
 
 if config_file:
     print(f"Overriding config with {config_file}:")
