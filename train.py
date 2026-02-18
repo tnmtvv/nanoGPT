@@ -80,11 +80,12 @@ parser.add_argument('--seed', type=float, default=0.0, help='seed')
 # Optimizer arguments
 parser.add_argument('--optimizer_name', type=str, default="AdamW", help='optimizer choice')
 parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
+parser.add_argument('--rank', type=float, default=1, help='optimizer rank')
 parser.add_argument('--max_iters', type=int, default=600000, help='Maximum iterations')
 parser.add_argument('--weight_decay', type=float, default=1e-1, help='Weight decay')
 parser.add_argument('--beta1', type=float, default=0.9, help='Adam beta1')
 parser.add_argument('--beta2', type=float, default=0.95, help='Adam beta2')
-parser.add_argument('--rank', type=int, default=1, help='Rank for low-rank optimizers')
+# parser.add_argument('--rank', type=int, default=1, help='Rank for low-rank optimizers')
 parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
 
 # Learning rate decay
@@ -142,6 +143,7 @@ dtype = args.dtype
 compile = args.compile
 optimizer_name = args.optimizer_name
 seed = args.seed
+rank = args.rank
 
 
 # # -----------------------------------------------------------------------------
@@ -217,7 +219,7 @@ else:
     ddp_world_size = 1
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
+    os.environ['MASTER_PORT'] = '29500'
     os.environ['WORLD_SIZE'] = '1'
     os.environ['RANK'] = '0'
     dist.init_process_group(backend='nccl', init_method='env://')
@@ -319,7 +321,12 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type, opt_name=optimizer_name)
+print("configure optimizer")
+print()
+print()
+print()
+
+optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type, opt_name=optimizer_name, rank=int(rank))
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
@@ -413,12 +420,14 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 # logging
-if master_process:
+if master_process and wandb_log ==  True:
     print("clearml init")
     from clearml import Task
     task = Task.init(project_name=wandb_project, task_name=wandb_run_name)
-    print(seed)
-    csv_logger = CsvLogger(opt_name=optimizer_name, bs=batch_size, lr=learning_rate, filename=f"out-{optimizer_name}-bs{batch_size}-lr{learning_rate}/log.csv", seed=seed)
+print("optimizer_name", optimizer_name)
+
+# csv_logger = CsvLogger(opt_name=optimizer_name, bs=batch_size, lr=learning_rate, filename=f"out-{optimizer_name}-bs{batch_size}-lr{learning_rate}/log.csv", seed=seed)
+csv_logger = CsvLogger(opt_name=optimizer_name, bs=batch_size, lr=learning_rate, filename=f"out-{optimizer_name}-check/log.csv", seed=seed)
 
 # training loop
 X, Y = get_batch('train', ) # fetch the very first batch
@@ -437,60 +446,62 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         metrics = estimate_loss_with_metrics(model, ctx)
 
-        # FIXED: Access nested dictionary values
-        print(f"step {iter_num}: train loss {metrics['train']['loss']:.4f}, val loss {metrics['val']['loss']:.4f}")
-        print(f"  train ppl: {metrics['train']['perplexity']:.4f}, val ppl: {metrics['val']['perplexity']:.4f}")
-        print("logging")
+        if wandb_log:
+            # FIXED: Access nested dictionary values
+            print(f"step {iter_num}: train loss {metrics['train']['loss']:.4f}, val loss {metrics['val']['loss']:.4f}")
+            print(f"  train ppl: {metrics['train']['perplexity']:.4f}, val ppl: {metrics['val']['perplexity']:.4f}")
+            print("logging")
 
-        if master_process:
-            # Loss metrics
-            task.get_logger().report_scalar("loss", "train", metrics['train']['loss'], iter_num)
-            task.get_logger().report_scalar("loss", "val", metrics['val']['loss'], iter_num)
+            if master_process:
+                # Loss metrics
+                task.get_logger().report_scalar("loss", "train", metrics['train']['loss'], iter_num)
+                task.get_logger().report_scalar("loss", "val", metrics['val']['loss'], iter_num)
 
-            # Perplexity metrics - FIXED
-            try:
-                task.get_logger().report_scalar("perplexity", "train", metrics['train']['perplexity'], iter_num)
-                task.get_logger().report_scalar("perplexity", "val", metrics['val']['perplexity'], iter_num)
-            except Exception as e:
-                print(f"ERROR logging perplexity: {e}")
-            
-            try:
-                task.get_logger().report_scalar("token_accuracy", "train", metrics['train']['token_accuracy'], iter_num)
-                task.get_logger().report_scalar("token_accuracy", "val", metrics['val']['token_accuracy'], iter_num)
-            except Exception as e:
-                print(f"ERROR logging token_accuracy: {e}")
-            
-            try:
-                task.get_logger().report_scalar("top5_accuracy", "train", metrics['train']['top5_accuracy'], iter_num)
-                task.get_logger().report_scalar("top5_accuracy", "val", metrics['val']['top5_accuracy'], iter_num)
-            except Exception as e:
-                print(f"ERROR logging top5_accuracy: {e}")
-    
-                # Confidence - FIXED
-                task.get_logger().report_scalar("confidence", "train", metrics['train']['mean_confidence'], iter_num)
-                task.get_logger().report_scalar("confidence", "val", metrics['val']['mean_confidence'], iter_num)
-    
-                # Entropy - FIXED
-                task.get_logger().report_scalar("entropy", "train", metrics['train']['entropy'], iter_num)
-                task.get_logger().report_scalar("entropy", "val", metrics['val']['entropy'], iter_num)
-    
-                # Bits per character - FIXED
-                task.get_logger().report_scalar("bits_per_char", "train", metrics['train']['bpc'], iter_num)
-                task.get_logger().report_scalar("bits_per_char", "val", metrics['val']['bpc'], iter_num)
-    
-                # Learning rate and MFU
-                task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
-                task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+                # Perplexity metrics - FIXED
+                try:
+                    task.get_logger().report_scalar("perplexity", "train", metrics['train']['perplexity'], iter_num)
+                    task.get_logger().report_scalar("perplexity", "val", metrics['val']['perplexity'], iter_num)
+                except Exception as e:
+                    print(f"ERROR logging perplexity: {e}")
+
+                try:
+                    task.get_logger().report_scalar("token_accuracy", "train", metrics['train']['token_accuracy'], iter_num)
+                    task.get_logger().report_scalar("token_accuracy", "val", metrics['val']['token_accuracy'], iter_num)
+                except Exception as e:
+                    print(f"ERROR logging token_accuracy: {e}")
+
+                try:
+                    task.get_logger().report_scalar("top5_accuracy", "train", metrics['train']['top5_accuracy'], iter_num)
+                    task.get_logger().report_scalar("top5_accuracy", "val", metrics['val']['top5_accuracy'], iter_num)
+                except Exception as e:
+                    print(f"ERROR logging top5_accuracy: {e}")
+
+                    # Confidence - FIXED
+                    task.get_logger().report_scalar("confidence", "train", metrics['train']['mean_confidence'], iter_num)
+                    task.get_logger().report_scalar("confidence", "val", metrics['val']['mean_confidence'], iter_num)
+
+                    # Entropy - FIXED
+                    task.get_logger().report_scalar("entropy", "train", metrics['train']['entropy'], iter_num)
+                    task.get_logger().report_scalar("entropy", "val", metrics['val']['entropy'], iter_num)
+
+                    # Bits per character - FIXED
+                    task.get_logger().report_scalar("bits_per_char", "train", metrics['train']['bpc'], iter_num)
+                    task.get_logger().report_scalar("bits_per_char", "val", metrics['val']['bpc'], iter_num)
+
+                    # Learning rate and MFU
+                    task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
+                    task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
 
             # Remove the redundant second part
-            # csv_logger.report_scalar("train", "loss", losses['train'], iter_num)
-            # csv_logger.report_scalar("val", "loss", losses['val'], iter_num)
-            # csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
-            # csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+        csv_logger.report_scalar("train", "loss", metrics['train']['loss'], iter_num)
+        csv_logger.report_scalar("val", "loss", metrics['val']['loss'], iter_num)
+        csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
+        csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
-        # if (losses['val'] < best_val_loss) or always_save_checkpoint:
-        #     best_val_loss = losses['val']
+        # if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
+        # if always_save_checkpoint:
+        #     best_val_loss = metrics['val']['loss']
         #     if iter_num > 0:
         #         checkpoint = {
         #             'model': raw_model.state_dict(),
@@ -553,5 +564,5 @@ while True:
 if master_process:
     task.close()
 
-if ddp:
-    destroy_process_group()
+# if ddp:
+destroy_process_group()

@@ -50,6 +50,7 @@ def compute_eigenvalues(checkpoint_path, input_ids, targets, device="cuda"):
     model_args = checkpoint['model_args']
     gptconf = GPTConfig(**model_args)
     
+    # Disable flash attention - it doesn't support double backward
     if hasattr(gptconf, 'flash'):
         gptconf.flash = False
     
@@ -57,11 +58,17 @@ def compute_eigenvalues(checkpoint_path, input_ids, targets, device="cuda"):
     
     # Load state dict
     state_dict = checkpoint['model']
+    
+    # Fix keys starting with '_orig_mod.'
     for k in list(state_dict.keys()):
         if k.startswith('_orig_mod.'):
             state_dict[k.replace('_orig_mod.', '')] = state_dict.pop(k)
     
-    model.load_state_dict(state_dict)
+    # Load with strict=False to allow missing/unexpected keys
+    load_result = model.load_state_dict(state_dict, strict=False)
+    print("Missing keys:", load_result.missing_keys)
+    print("Unexpected keys:", load_result.unexpected_keys)
+    
     model.eval()
     model.to(device)
     
@@ -69,39 +76,40 @@ def compute_eigenvalues(checkpoint_path, input_ids, targets, device="cuda"):
     input_ids_gpu = input_ids.to(device)
     targets_gpu = targets.to(device)
     
-    # Test forward pass
-    with torch.no_grad():
-        logits, loss = model(input_ids_gpu, targets_gpu)
-    print(f"✓ Forward pass successful! Loss: {loss.item():.4f}")
-    
-    # Compute eigenvalues
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Computing Hessian for {num_params:,} parameters...")
-    
-    def hvp_numpy(x):
-        x_torch = torch.tensor(x, dtype=torch.float32).to(device)
-        return hessian_vector_product(model, input_ids_gpu, targets_gpu, x_torch).cpu().numpy()
-    
-    A = spsplin.LinearOperator((num_params, num_params), matvec=hvp_numpy)
-    
-    print("Computing max eigenvalue...")
-    res_max = spsplin.eigsh(A, k=1, which="LA", return_eigenvectors=False, tol=1e-3)
-    max_sv = res_max[0]
-    print(f"Max eigenvalue: {max_sv:.6f}")
-    
-    print("Computing min eigenvalue...")
-    res_min = spsplin.eigsh(A, k=1, which="SA", return_eigenvectors=False, tol=1e-3)
-    min_sv = res_min[0]
-    print(f"Min eigenvalue: {min_sv:.6f}")
-    
-    print(f"Condition number: {abs(max_sv/min_sv):.2f}")
+    # Force use of math backend for SDPA (supports double backward)
+    with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+        # Test forward pass
+        with torch.no_grad():
+            logits, loss = model(input_ids_gpu, targets_gpu)
+        print(f"✓ Forward pass successful! Loss: {loss.item():.4f}")
+        
+        # Compute eigenvalues
+        num_params = sum(p.numel() for p in model.parameters())
+        print(f"Computing Hessian for {num_params:,} parameters...")
+        
+        def hvp_numpy(x):
+            x_torch = torch.tensor(x, dtype=torch.float32).to(device)
+            return hessian_vector_product(model, input_ids_gpu, targets_gpu, x_torch).cpu().numpy()
+        
+        A = spsplin.LinearOperator((num_params, num_params), matvec=hvp_numpy)
+        
+        print("Computing max eigenvalue...")
+        res_max = spsplin.eigsh(A, k=1, which="LA", return_eigenvectors=False, tol=1e-3)
+        max_sv = res_max[0]
+        print(f"Max eigenvalue: {max_sv:.6f}")
+        
+        print("Computing min eigenvalue...")
+        res_min = spsplin.eigsh(A, k=1, which="SA", return_eigenvectors=False, tol=1e-3)
+        min_sv = res_min[0]
+        print(f"Min eigenvalue: {min_sv:.6f}")
+        
+        print(f"Condition number: {abs(max_sv/min_sv):.2f}")
     
     # Clean up
     del model
     torch.cuda.empty_cache()
     
     return min_sv, max_sv
-
 
 def process_checkpoints(checkpoint_pattern, output_csv="hessian_results.csv", device="cuda"):
     """Process multiple checkpoints and save results to DataFrame."""
@@ -206,11 +214,11 @@ if __name__ == "__main__":
     # Checkpoint naming convention: <iter_num>_<other_info>.pt
     # e.g., 1000_model.pt, 2000_model.pt, 5000_model.pt
     
-    checkpoint_pattern = "out-hessian-debug/*_*.pt"  # Adjust this pattern
+    checkpoint_pattern = "out-hessian-adagram-best/*_*.pt"  # Adjust this pattern
     
     df = process_checkpoints(
         checkpoint_pattern=checkpoint_pattern,
-        output_csv="hessian_eigenvalues.csv",
+        output_csv="hessian_eigenvalues_adagram_best.csv",
         device="cuda"
     )
     

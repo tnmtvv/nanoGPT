@@ -67,6 +67,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
+# learning_rate_full = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
@@ -292,21 +293,21 @@ while True:
             task.get_logger().report_scalar("lr", "lr", lr, iter_num)
             task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
             task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
-        # if losses['val'] < best_val_loss or always_save_checkpoint:
-        #     best_val_loss = losses['val']
-        #     if iter_num > 0:
-        #         # 2. Save state dictionaries for BOTH optimizers
-        #         checkpoint = {
-        #             'model': raw_model.state_dict(),
-        #             'optimizer_adagram': optimizer_adagram.state_dict(),
-        #             'optimizer_adamw': optimizer_adamw.state_dict(),
-        #             'model_args': model_args,
-        #             'iter_num': iter_num,
-        #             'best_val_loss': best_val_loss,
-        #             'config': config,
-        #         }
-        #         print(f"saving checkpoint to {out_dir}")
-        #         torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+        if losses['val'] < best_val_loss or always_save_checkpoint:
+            best_val_loss = losses['val']
+            if iter_num > 0:
+                # 2. Save state dictionaries for BOTH optimizers
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'optimizer_adagram': optimizer_adagram.state_dict(),
+                    'optimizer_adamw': optimizer_adamw.state_dict(),
+                    'model_args': model_args,
+                    'iter_num': iter_num,
+                    'best_val_loss': best_val_loss,
+                    'config': config,
+                }
+                print(f"saving checkpoint to {out_dir}")
+                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     
     if iter_num == 0 and eval_only:
         break

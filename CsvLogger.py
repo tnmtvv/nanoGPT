@@ -17,6 +17,7 @@ class CsvLogger:
         
         # Create directory if it doesn't exist (only if directory is not empty string)
         if directory and not os.path.exists(directory):
+            print('here')
             os.makedirs(directory, exist_ok=True)
         
         # Write header if file doesn't exist

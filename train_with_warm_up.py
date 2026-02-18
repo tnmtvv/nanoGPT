@@ -390,26 +390,8 @@ while True:
         lr = get_lr(iter_num, learning_rate_diag) if decay_lr else learning_rate_diag
     else:
         optimizer = optimizer_adagram
-        lr = get_lr(iter_num, learning_rate_full) if decay_lr else learning_rate_full
-        # lr = learning_rate_full
-
-# X, Y = get_batch('train', batch_size) # fetch the very first batch
-# t0 = time.time()
-# local_iter_num = 0 # number of iterations in the lifetime of this process
-# raw_model = model.module if ddp else model # unwrap DDP container if needed
-# running_mfu = -1.0
-# while True:
-#     if iter_num < 1000:
-#         optimizer = optimizer_adamw
-#         print(learning_rate)
-#         lr = get_lr(iter_num, learning_rate) if decay_lr else learning_rate
-#     else:
-#         optimizer = optimizer_adamw
-#         print(learning_rate)
-#         lr = get_lr(iter_num, learning_rate) if decay_lr else learning_rate
-        # lr = learning_rate_full
-
-    # determine and set the learning rate for this iteration
+        # lr = get_lr(iter_num, learning_rate_full) if decay_lr else learning_rate_full
+        lr = learning_rate_full
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
@@ -463,6 +445,19 @@ while True:
                 task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
                 task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
+            if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
+                    best_val_loss = metrics['val']['loss']
+                    if iter_num > 0:
+                        checkpoint = {
+                            'model': raw_model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'model_args': model_args,
+                            'iter_num': iter_num,
+                            'best_val_loss': best_val_loss,
+                            'config': config,
+                        }
+                        print(f"saving checkpoint to {out_dir}")
+                        torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -523,4 +518,3 @@ if master_process:
 
 if ddp:
     destroy_process_group()
-

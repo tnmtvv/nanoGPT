@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the grid search parameters
-BATCH_SIZES=(128 256 512)
+BATCH_SIZES=(156)
 LEARNING_RATES=(1e-5 1e-4 1e-3 1e-2)
 OPTIMIZERS=(AdaGram)
 

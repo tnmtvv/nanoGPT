@@ -70,30 +70,52 @@ def filter_by_seed(df, seed=1):
 
 def get_best_val_loss_per_batch_size(df):
     """
-    For each batch_size, keep only the row with the best (minimum) val_loss.
-    
-    Args:
-        df: Input DataFrame
-        
-    Returns:
-        DataFrame with best val_loss per batch_size
+    For each (batch_size, optimizer_name, seed), keep only the row 
+    with the best (minimum) val_loss across iterations.
     """
-    # Check if required columns exist
-    required_cols = ['batch_size', 'val_loss', 'optimizer_name']
+    required_cols = ['batch_size', 'val_loss', 'optimizer_name', 'seed']
     missing_cols = [col for col in required_cols if col not in df.columns]
     
     if missing_cols:
         print(f"Warning: Missing columns {missing_cols}")
-        # Try to infer column names
         print(f"Available columns: {df.columns.tolist()}")
         return df
     
-    # Group by batch_size and optimizer_name, then get minimum val_loss
-    best_df = df.loc[df.groupby(['batch_size', 'optimizer_name'])['val_loss'].idxmin()]
+    # Group by batch_size, optimizer_name, AND seed
+    best_df = df.loc[df.groupby(['batch_size', 'optimizer_name', 'seed'])['val_loss'].idxmin()]
     
-    print(f"\nBest results per batch_size/optimizer_name: {len(best_df)} rows")
+    print(f"\nBest results per (batch_size, optimizer_name, seed): {len(best_df)} rows")
     
-    return best_df.sort_values(['batch_size', 'optimizer_name']).reset_index(drop=True)
+    return best_df.sort_values(['batch_size', 'optimizer_name', 'seed']).reset_index(drop=True)
+
+
+import numpy as np
+
+
+def clean_seeds(df):
+    opt_names = np.unique(df['optimizer_name'])
+    opt_csvs_correct = []
+    
+    for opt_name in opt_names:
+        opt_df = df.query('optimizer_name == @opt_name').copy()
+
+        # A new run starts whenever iter_num resets to 0
+        opt_df["is_new_run"] = opt_df["iter_num"] == 0
+
+        # IMPORTANT: compute run_id per experiment stream, not just per seed
+        # (otherwise keeping run_id==0 drops other batch sizes / lrs)
+        run_keys = ["seed", "batch_size", "learning_rate"]
+        opt_df["run_id"] = opt_df.groupby(run_keys)["is_new_run"].cumsum().astype(int) - 1
+
+        # Keep only the first run within each (seed, batch_size, learning_rate)
+        df_single = opt_df[opt_df["run_id"] == 0].copy()
+        df_single = df_single.drop(columns=["run_id", "is_new_run"])
+
+        opt_csvs_correct.append(df_single)
+    
+    return pd.concat(opt_csvs_correct, ignore_index=True)
+
+    
 
 
 def create_plot(df, output_dir='plots', figsize=(10, 6)):
@@ -222,7 +244,7 @@ def main():
     parser.add_argument(
         '--seed',
         type=int,
-        default=1,
+        default=0,
         help='Seed value to filter by (default: 1)'
     )
     parser.add_argument(
@@ -240,26 +262,27 @@ def main():
     # Step 1: Load and combine CSVs
     print("\n[Step 1/4] Loading and combining CSV files...")
     combined_df = load_and_combine_csvs(args.csv_dir)
+
+    new_combined_df = clean_seeds(combined_df)
+    print(np.unique(new_combined_df['batch_size']))
     
     # Step 2: Filter by seed
-    seeds = [1, 2, 3, 4, 5, 6]
+    seeds = [1, 2, 3, 4, 5]
     seed_dfs = []
-    for seed in seeds:
-        print(f"\n[Step 2/4] Filtering by seed={args.seed}...")
-        seed_df = filter_by_seed(combined_df, seed=seed)
-    
-        # Step 3: Get best val_loss per batch_size
-        print("\n[Step 3/4] Selecting best val_loss per batch_size...")
-        best_df = get_best_val_loss_per_batch_size(seed_df)
-        seed_dfs.append(best_df)
-    
-    new_df = pd.concat(seed_dfs, ignore_index=True)
+
+    # keep only these seeds
+    seed_df = combined_df[combined_df["seed"].isin(seeds)].copy()
+
+    # now this will return 1 row per (batch_size, optimizer_name, seed)
+    new_df = get_best_val_loss_per_batch_size(seed_df)
+    # new_df = pd.concat(seed_dfs, ignore_index=True)
     # To this:
     print("\nSample of concatenated data (new_df):")
     print(new_df[['batch_size', 'optimizer_name', 'val_loss', 'seed']].head(40))
     print(f"\nTotal rows: {len(new_df)}")
     print(f"Expected: {len(seeds)} seeds × {new_df[['batch_size', 'optimizer_name']].drop_duplicates().shape[0]} groups")
 
+    new_df.to_csv("batch_results.csv")
     # # Display best results
     # print("\nBest Results:")
     # print(best_df[['batch_size', 'optimizer_name', 'val_loss', 'seed']].to_string(index=False))
