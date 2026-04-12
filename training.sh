@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Define the grid search parameters
-BATCH_SIZES=(8 16 32 64 128 256 512)
-LEARNING_RATES=(1e-2 1e-3 1e-4 1e-5)
-OPTIMIZERS=(AdaGramSVD)
-RANKS=(1 2 3 4 5)
+BATCH_SIZES=(16)
+LEARNING_RATES=(1e-3)
+OPTIMIZERS=(AdamW)
+RANKS=(1)
 
 # Specify the directory where the config files are located
 CONFIG_DIR="config"
@@ -17,14 +17,16 @@ for rank in "${RANKS[@]}"; do
     for bs in "${BATCH_SIZES[@]}"; do
       for lr in "${LEARNING_RATES[@]}"; do
         # Construct the full path to the config file inside the 'config' directory
-        CONFIG_FILE="${CONFIG_DIR}/train_shakespeare_nano.py"
+        CONFIG_FILE="${CONFIG_DIR}/finetune_shakespeare.py"
+        # CONFIG_FILE="${CONFIG_DIR}/shakespeare_char_original.py"
+        
         # Check if the config file exists at the specified path
         if [ -f "$CONFIG_FILE" ]; then
           echo "-----------------------------------------------------"
           echo "Running training with optimizer: ${opt}, batch_size: ${bs}, learning_rate: ${lr}, rank: ${rank}"
           echo "-----------------------------------------------------"
           # Execute the main train.py script with the correct config file path
-          CUDA_VISIBLE_DEVICES=7 python train.py --config "${CONFIG_FILE}" --optimizer "${opt}" --learning_rate "${lr}" --batch_size "${bs}" --wandb_run_name "${opt}_bs${bs}_lr${lr}_rank${rank}" --max_iters "5000"
+          CUDA_VISIBLE_DEVICES=7 python train.py --config "${CONFIG_FILE}" --optimizer "${opt}" --learning_rate "${lr}" --batch_size "${bs}" --rank "${rank}" --wandb_run_name "finetune_${opt}_bs${bs}_lr${lr}_rank${rank}" --max_iters "5000"
         else
           echo "Warning: Config file not found, skipping: ${CONFIG_FILE}"
         fi

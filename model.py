@@ -16,9 +16,11 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from adagram_optimizers.AdamGram import AdamGram
+from adagram_optimizers.AdamGram import AdamGram, SymAdamGram, EQAdamGram, SVDAdamGram
 from adagram_optimizers.AdaGram_eq import AdaGramEQ
 from adagram_optimizers.AdagramSVD import AdaGramFR
+from adagram_optimizers.SymAdaGram import SymAdaGram
+# from adagram_optimizers.AdamGram import SymAdamGram
 
 
 from muon import MuonWithAuxAdam
@@ -295,11 +297,21 @@ class GPT(nn.Module):
         if opt_name == 'AdaGram':
             print("RANK", rank)
             optimizer = AdamGram(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'SymAdaGram':
+            print("RANK", rank)
+            optimizer = SymAdaGram(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'SymAdamGram':
+            print("RANK", rank)
+            optimizer = SymAdamGram(optim_groups, lr=learning_rate, max_rank=rank)
         if opt_name == 'AdaGramSVD':
             print("RANK", rank)
             optimizer = AdaGramFR(optim_groups, lr=learning_rate, max_rank=rank)
         if opt_name == 'AdaGramEQ':
             optimizer = AdaGramEQ(optim_groups, lr=learning_rate, max_rank=rank, enable_logging=False)
+        if opt_name == 'EQAdamGram':
+            optimizer = EQAdamGram(optim_groups, lr=learning_rate, max_rank=rank, enable_logging=False)
+        if opt_name == 'SVDAdamGram':
+            optimizer = SVDAdamGram(optim_groups, lr=learning_rate, max_rank=rank, enable_logging=False)
         if opt_name == 'AdamW':
             fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device_type == 'cuda'
@@ -358,40 +370,40 @@ class GPT(nn.Module):
         return optimizer
 
 
-    def configure_two_optimizers(self, weight_decay, learning_rate, betas, device_type, rank=1):
+    def configure_two_optimizers(
+        self,
+        weight_decay,
+        betas,
+        lr_adagram: float = 0.001,
+        lr_adamw: float = 0.001,
+        rank=1,
+    ):
         """
         Configures and returns two separate optimizers:
-        1. AdaGramPS for 2D+ matrix parameters.
+        1. SymAdamGram for 2D+ matrix parameters.
         2. AdamW for <2D non-matrix parameters (e.g., biases, layernorms).
         """
-        # Start with all of the candidate parameters that require gradients
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-    
-        # Separate parameters into matrix (decay) and non-matrix (nodecay) groups
-        matrix_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+
+        matrix_params     = [p for n, p in param_dict.items() if p.dim() >= 2]
         non_matrix_params = [p for n, p in param_dict.items() if p.dim() < 2]
 
-        # Print parameter statistics
-        num_matrix_params = sum(p.numel() for p in matrix_params)
+        num_matrix_params     = sum(p.numel() for p in matrix_params)
         num_non_matrix_params = sum(p.numel() for p in non_matrix_params)
         print(f"num matrix parameter tensors: {len(matrix_params)}, with {num_matrix_params:,} parameters")
         print(f"num non-matrix parameter tensors: {len(non_matrix_params)}, with {num_non_matrix_params:,} parameters")
-    
-        # 1. Create AdaGramPS optimizer for matrix parameters
-        # The original weight_decay is applied to this group by default in many optimizers,
-        # but AdaGramPS does not have a standard 'weight_decay' argument.
-        # If your AdaGramPS implementation supports it, you can pass it here.
-        # We also apply the main learning rate to this group.
-        optimizer_adagram = AdamGram([{'params': matrix_params, 'weight_decay': weight_decay}], lr=learning_rate, max_rank=rank)
-        
-        # 2. Create AdamW optimizer for non-matrix parameters
-        # As per the original logic, weight decay is disabled for this group.
-        optimizer_adamw = torch.optim.AdamW(
-            [{'params': non_matrix_params, 'weight_decay': 0.0}], 
-            lr=learning_rate, betas=betas
+
+        optimizer_adagram = SymAdamGram(
+            [{"params": matrix_params, "weight_decay": weight_decay}],
+            lr=lr_adagram,
+            max_rank=rank,
         )
-    
-        # Return both optimizers
+        optimizer_adamw = torch.optim.AdamW(
+            [{"params": non_matrix_params, "weight_decay": 0.0}],
+            lr=lr_adamw,
+            betas=betas,
+        )
+
         return optimizer_adagram, optimizer_adamw
 
     # def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):

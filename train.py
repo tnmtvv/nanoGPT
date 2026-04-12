@@ -499,20 +499,19 @@ while True:
         csv_logger.report_scalar("learning_rate", "lr", lr, iter_num)
         csv_logger.report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
-        # if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
-        # if always_save_checkpoint:
-        #     best_val_loss = metrics['val']['loss']
-        #     if iter_num > 0:
-        #         checkpoint = {
-        #             'model': raw_model.state_dict(),
-        #             'optimizer': optimizer.state_dict(),
-        #             'model_args': model_args,
-        #             'iter_num': iter_num,
-        #             'best_val_loss': best_val_loss,
-        #             'config': config,
-        #         }
-        #         print(f"saving checkpoint to {out_dir}")
-        #         torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
+        if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
+            best_val_loss = metrics['val']['loss']
+            if iter_num > 0:
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'model_args': model_args,
+                    'iter_num': iter_num,
+                    'best_val_loss': best_val_loss,
+                    'config': config,
+                }
+                print(f"saving checkpoint to {out_dir}")
+                torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 

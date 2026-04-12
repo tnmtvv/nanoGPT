@@ -278,7 +278,9 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 # optimizer
 # optimizer_adagram, optimizer_adamw = model.configure_warmup_optimizers(weight_decay, learning_rate_diag, learning_rate_full, (beta1, beta2), device_type, rank)
 optimizer_adamw = model.configure_optimizers(weight_decay, learning_rate_diag, (beta1, beta2), device_type, opt_name='AdamW')
-optimizer_adagram = model.configure_optimizers(weight_decay, learning_rate_full, (beta1, beta2), device_type, opt_name='AdaGram')
+optimizer_adagram = model.configure_optimizers(weight_decay, learning_rate_full, (beta1, beta2), device_type, opt_name=optimizer_name, rank=rank)
+print("optimizer name", optimizer_name)
+print("learning_rate_full", learning_rate_full)
 if init_from == 'resume':
     optimizer_adagram.load_state_dict(checkpoint['optimizer_adagram'])
     optimizer_adamw.load_state_dict(checkpoint['optimizer_adamw'])
@@ -379,19 +381,19 @@ if master_process:
     task = Task.init(project_name=wandb_project, task_name=wandb_run_name)
 
 # training loop
-X, Y = get_batch('train', batch_size_diag) # fetch the very first batch
+X, Y = get_batch('train', batch_size_full) # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 while True:
-    if iter_num < 1000:
-        optimizer = optimizer_adamw
-        lr = get_lr(iter_num, learning_rate_diag) if decay_lr else learning_rate_diag
-    else:
+    if iter_num < 250:
         optimizer = optimizer_adagram
+        lr = get_lr(iter_num, learning_rate_full) if decay_lr else learning_rate_full
+    else:
+        optimizer = optimizer_adamw
         # lr = get_lr(iter_num, learning_rate_full) if decay_lr else learning_rate_full
-        lr = learning_rate_full
+        lr = learning_rate_diag
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
@@ -445,19 +447,19 @@ while True:
                 task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
                 task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
 
-            if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
-                    best_val_loss = metrics['val']['loss']
-                    if iter_num > 0:
-                        checkpoint = {
-                            'model': raw_model.state_dict(),
-                            'optimizer': optimizer.state_dict(),
-                            'model_args': model_args,
-                            'iter_num': iter_num,
-                            'best_val_loss': best_val_loss,
-                            'config': config,
-                        }
-                        print(f"saving checkpoint to {out_dir}")
-                        torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
+            # if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
+                    # best_val_loss = metrics['val']['loss']
+                    # if iter_num > 0:
+                    #     checkpoint = {
+                    #         'model': raw_model.state_dict(),
+                    #         'optimizer': optimizer.state_dict(),
+                    #         'model_args': model_args,
+                    #         'iter_num': iter_num,
+                    #         'best_val_loss': best_val_loss,
+                    #         'config': config,
+                    #     }
+                    #     print(f"saving checkpoint to {out_dir}")
+                    #     torch.save(checkpoint, os.path.join(out_dir, f'{iter_num}_ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -475,10 +477,10 @@ while True:
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         
-        if iter_num < 1000:
-            X, Y = get_batch('train', batch_size_diag)
-        else:
+        if iter_num < 250:
             X, Y = get_batch('train', batch_size_full)
+        else:
+            X, Y = get_batch('train', batch_size_diag)
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -500,7 +502,7 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            if iter_num < 1000:
+            if iter_num < 250:
                 mfu = raw_model.estimate_mfu(batch_size_diag * gradient_accumulation_steps, dt)
             else:
                 mfu = raw_model.estimate_mfu(batch_size_full * gradient_accumulation_steps, dt)

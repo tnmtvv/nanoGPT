@@ -19,3 +19,8 @@ config/
 assets/
 name/
 large_bs_checkpoints/
+*.png
+*.pdf
+*.npz
+*.csv
+hessians*/
