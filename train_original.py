@@ -80,9 +80,7 @@ parser.add_argument('--seed', type=float, default=0.0, help='seed')
 # Optimizer arguments
 parser.add_argument('--optimizer_name', type=str, default="AdamW", help='optimizer choice')
 parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
-parser.add_argument('--scheduler', type=str, default='cos', help='Scheduler type')
 parser.add_argument('--rank', type=float, default=1, help='optimizer rank')
-parser.add_argument('--alpha', type=float, default=1, help='optimizer alpha')
 parser.add_argument('--max_iters', type=int, default=600000, help='Maximum iterations')
 parser.add_argument('--weight_decay', type=float, default=1e-1, help='Weight decay')
 parser.add_argument('--beta1', type=float, default=0.9, help='Adam beta1')
@@ -129,13 +127,11 @@ n_embd = args.n_embd
 dropout = args.dropout
 bias = args.bias
 learning_rate = args.learning_rate
-scheduler = args.scheduler
 max_iters = args.max_iters
 weight_decay = args.weight_decay
 beta1 = args.beta1
 beta2 = args.beta2
 rank = args.rank
-alpha = args.alpha
 grad_clip = args.grad_clip
 decay_lr = args.decay_lr
 warmup_iters = args.warmup_iters
@@ -148,10 +144,6 @@ compile = args.compile
 optimizer_name = args.optimizer_name
 seed = args.seed
 rank = args.rank
-
-wsd_cooldown_frac = 0.2
-wsd_decay_type = "cosine"
-
 
 
 # # -----------------------------------------------------------------------------
@@ -227,10 +219,10 @@ else:
     ddp_world_size = 1
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
+    os.environ['MASTER_PORT'] = '29500'
     os.environ['WORLD_SIZE'] = '1'
     os.environ['RANK'] = '0'
-    # dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://')
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
@@ -334,7 +326,7 @@ print()
 print()
 print()
 
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type, opt_name=optimizer_name, rank=int(rank), alpha=alpha)
+optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type, opt_name=optimizer_name, rank=int(rank))
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
@@ -413,8 +405,8 @@ def estimate_loss_with_metrics(model, ctx):
     model.train()
     return out
 
-# ── Cosine with warmup (nanoGPT default, unchanged) ─────────────────────────
-def get_lr_cos(it):
+# learning rate decay scheduler (cosine with warmup)
+def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
@@ -426,34 +418,6 @@ def get_lr_cos(it):
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return min_lr + coeff * (learning_rate - min_lr)
-
-
-# ── Warmup-Stable-Decay (WSD / Trapezoidal) ─────────────────────────────────
-def get_lr_wsd(it):
-    _decay_steps = int(lr_decay_iters * wsd_cooldown_frac)
-    _cooldown_start = lr_decay_iters - _decay_steps   # step where plateau ends
-
-    if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
-    if it < _cooldown_start:                           # flat plateau
-        return learning_rate
-    if it <= lr_decay_iters:                           # cooldown
-        progress = (it - _cooldown_start) / _decay_steps   # 0 → 1
-        if wsd_decay_type == "cosine":
-            return min_lr + 0.5 * (learning_rate - min_lr) * (1.0 + math.cos(math.pi * progress))
-        return learning_rate - (learning_rate - min_lr) * progress   # linear
-    return min_lr
-
-
-# ── Linear decay ─────────────────────────────────────────────────────────────
-def get_lr_linear(it):
-    if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
-    if it >= lr_decay_iters:
-        return min_lr
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    return min_lr + (learning_rate - min_lr) * (1.0 - decay_ratio)
-
 
 # logging
 if master_process and wandb_log ==  True:
@@ -471,20 +435,10 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
-print("!!!")
-print(f"scheduler {scheduler}")
 while True:
 
     # determine and set the learning rate for this iteration
-    if scheduler == 'cos':
-        lr = get_lr_cos(iter_num) 
-    elif scheduler == 'linear':
-        lr = get_lr_linear(iter_num)
-    elif scheduler == 'wsd':
-        lr = get_lr_wsd(iter_num) 
-    elif scheduler == 'no':
-        lr = learning_rate
-
+    lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -609,5 +563,5 @@ while True:
 if master_process:
     task.close()
 
-if ddp:
-    destroy_process_group()
+# if ddp:
+destroy_process_group()

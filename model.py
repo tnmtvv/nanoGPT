@@ -19,7 +19,10 @@ from torch.nn import functional as F
 from adagram_optimizers.AdamGram import AdamGram, SymAdamGram, EQAdamGram, SVDAdamGram
 from adagram_optimizers.AdaGram_eq import AdaGramEQ
 from adagram_optimizers.AdagramSVD import AdaGramFR
+from adagram_optimizers.AdagramPS import AdaGramPS
 from adagram_optimizers.SymAdaGram import SymAdaGram
+from adagram_optimizers.AdagramSqrtPS import AdaGramPS_Sqrt
+from adagram_optimizers.AdagramSqrtSVD import AdaGramFR_Sqrt
 # from adagram_optimizers.AdamGram import SymAdamGram
 
 
@@ -273,7 +276,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, opt_name='AdamW', rank=2):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, opt_name='AdamW', rank=2, alpha=None):
         # start with all of the candidate parameters
 
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -295,6 +298,15 @@ class GPT(nn.Module):
         print("optimizer", opt_name)
 
         if opt_name == 'AdaGram':
+            print("RANK", rank)
+            optimizer = AdaGramPS(optim_groups, lr=learning_rate, max_rank=rank, alpha=alpha)
+        if opt_name == 'AdaGramPS_Sqrt':
+            print("RANK", rank)
+            optimizer = AdaGramPS_Sqrt(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdaGramSVD_Sqrt':
+            print("RANK", rank)
+            optimizer = AdaGramFR_Sqrt(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdamGram':
             print("RANK", rank)
             optimizer = AdamGram(optim_groups, lr=learning_rate, max_rank=rank)
         if opt_name == 'SymAdaGram':
