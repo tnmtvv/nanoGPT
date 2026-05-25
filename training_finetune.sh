@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Define the grid search parameters
-BATCH_SIZES=(512)
-LEARNING_RATES=(1e-1)
-OPTIMIZERS=(AdaGram)
-RANKS=(1)
-ALPHAS=(0.5 0.9)
+BATCH_SIZES=(1)
+LEARNING_RATES=(3e-2)
+OPTIMIZERS=(AdamGramSqrt_SVD)
+RANKS=(15)
+# ALPHAS=()
 
 # Specify the directory where the config files are located
 CONFIG_DIR="configs"
@@ -14,13 +14,13 @@ echo "Starting training for all Shakespeare grid search configurations..."
 
 # Loop through each combination
 for rank in "${RANKS[@]}"; do
-  for alpha in "${ALPHAS[@]}"; do
+  # for alpha in "${ALPHAS[@]}"; do
     for opt in "${OPTIMIZERS[@]}"; do
       for bs in "${BATCH_SIZES[@]}"; do
         for lr in "${LEARNING_RATES[@]}"; do
           # Construct the full path to the config file inside the 'config' directory
-
-          CONFIG_FILE="configs/shakespeare_char_original.py"
+          CONFIG_FILE="${CONFIG_DIR}/gpt2_finetune.py"
+          # CONFIG_FILE="${CONFIG_DIR}/shakespeare_char_original.py"
 
           # Check if the config file exists at the specified path
           if [ -f "$CONFIG_FILE" ]; then
@@ -29,14 +29,14 @@ for rank in "${RANKS[@]}"; do
             echo "-----------------------------------------------------"
             # Execute the main train.py script with the correct config file path
             # torchrun --nproc_per_node=1 train_two_optimizers.py --config "${CONFIG_FILE}" --optimizer "${opt}" --learning_rate_diag "3e-4" --learning_rate_full "${lr}" --batch_size "${bs}" --rank "${rank}" --wandb_run_name "finetune_two_optimiazers_${opt}_bs${bs}_lr${lr}_rank${rank}" --max_iters "5000"
-            torchrun --nproc_per_node=1  train_original.py --config "${CONFIG_FILE}" --optimizer "${opt}" --learning_rate "${lr}" --batch_size "${bs}" --rank "${rank}" --alpha "${alpha}" --wandb_run_name "${opt}_bs${bs}_lr${lr}_alpha${alpha}" --max_iters "5000"
+            torchrun --nproc_per_node=1 train.py --config "${CONFIG_FILE}" --optimizer "${opt}" --learning_rate "${lr}" --batch_size "${bs}" --rank "${rank}" --wandb_run_name "finetune_${opt}_bs${bs}_lr${lr}" --max_iters "100"
           else
             echo "Warning: Config file not found, skipping: ${CONFIG_FILE}"
           fi
         done
       done
     done
-  done 
+  # done 
 done
 
 echo "----------------------------------------"

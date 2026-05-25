@@ -24,3 +24,8 @@ large_bs_checkpoints/
 *.npz
 *.csv
 hessians*/
+
+*.tar.gz
+data/cifar10/cifar-10-batches-py/*
+data/cifar100/cifar-100-python/*
+*.json

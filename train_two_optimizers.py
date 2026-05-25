@@ -29,6 +29,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
 
+from metrics import compute_perplexity, compute_bits_per_character, compute_token_accuracy, compute_top_k_accuracy, compute_confidence_metrics
+
+
 site_packages_path = '/opt/miniconda3/envs/nanogpt_python39/lib/python3.9/site-packages'
 
 # Add this path to the Python's search paths if it's not already there
@@ -75,7 +78,9 @@ parser.add_argument('--seed', type=float, default=0.0, help='seed')
 
 # Optimizer arguments
 parser.add_argument('--optimizer_name', type=str, default="AdamW", help='optimizer choice')
-parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
+# parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
+parser.add_argument('--learning_rate_diag', type=float, default=6e-4, help='Learning rate')
+parser.add_argument('--learning_rate_full', type=float, default=6e-4, help='Learning rate')
 parser.add_argument('--rank', type=float, default=1, help='optimizer rank')
 parser.add_argument('--max_iters', type=int, default=600000, help='Maximum iterations')
 parser.add_argument('--weight_decay', type=float, default=1e-1, help='Weight decay')
@@ -122,12 +127,14 @@ n_head = args.n_head
 n_embd = args.n_embd
 dropout = args.dropout
 bias = args.bias
-learning_rate = args.learning_rate
+# learning_rate = args.learning_rate
+learning_rate_diag = args.learning_rate_diag
+learning_rate_full = args.learning_rate_full
 max_iters = args.max_iters
 weight_decay = args.weight_decay
 beta1 = args.beta1
 beta2 = args.beta2
-rank = args.rank
+# rank = args.rank
 grad_clip = args.grad_clip
 decay_lr = args.decay_lr
 warmup_iters = args.warmup_iters
@@ -271,7 +278,8 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer_adagram, optimizer_adamw = model.configure_two_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type, rank)
+print(f"!!!rank {rank}!!!")
+optimizer_adagram, optimizer_adamw = model.configure_two_optimizers(optimizer_name, weight_decay, (beta1, beta2), learning_rate_full, learning_rate_diag, rank=int(rank))
 if init_from == 'resume':
     optimizer_adagram.load_state_dict(checkpoint['optimizer_adagram'])
     optimizer_adamw.load_state_dict(checkpoint['optimizer_adamw'])
@@ -303,8 +311,57 @@ def estimate_loss():
     model.train()
     return out
 
+
+@torch.no_grad()
+def estimate_loss_with_metrics(model, ctx):
+    """
+    Enhanced evaluation function that computes loss and additional metrics.
+    """
+    out = {}
+    model.eval()
+    
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        perplexities = torch.zeros(eval_iters)
+        token_accuracies = torch.zeros(eval_iters)
+        top5_accuracies = torch.zeros(eval_iters)
+        confidences = torch.zeros(eval_iters)
+        entropies = torch.zeros(eval_iters)
+        
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                logits, loss = model(X, Y)
+            
+            # Basic metrics
+            losses[k] = loss.item()
+            perplexities[k] = compute_perplexity(loss)
+            
+            # Accuracy metrics
+            token_accuracies[k] = compute_token_accuracy(logits, Y)
+            top5_accuracies[k] = compute_top_k_accuracy(logits, Y, k=5)
+            
+            # Confidence metrics
+            mean_conf, entropy = compute_confidence_metrics(logits)
+            confidences[k] = mean_conf
+            entropies[k] = entropy
+        
+        # Store all metrics
+        out[split] = {
+            'loss': losses.mean().item(),
+            'perplexity': perplexities.mean().item(),
+            'token_accuracy': token_accuracies.mean().item(),
+            'top5_accuracy': top5_accuracies.mean().item(),
+            'mean_confidence': confidences.mean().item(),
+            'entropy': entropies.mean().item(),
+            'bpc': compute_bits_per_character(losses.mean())
+        }
+    
+    model.train()
+    return out
+
 # learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
+def get_lr(it, learning_rate):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
@@ -331,25 +388,67 @@ raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 while True:
     # 1. Determine and set the learning rate for this iteration for BOTH optimizers
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+    lr_adamw = get_lr(iter_num, learning_rate_diag) if decay_lr else learning_rate_diag
+    lr_adagram = get_lr(iter_num, learning_rate_full) if decay_lr else learning_rate_full
     for param_group in optimizer_adagram.param_groups:
-        param_group['lr'] = lr
+        param_group['lr'] = lr_adagram
     for param_group in optimizer_adamw.param_groups:
-        param_group['lr'] = lr
+        param_group['lr'] = lr_adamw
 
     # Evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        print("logging")
-        if master_process:
-            task.get_logger().report_scalar("train_loss", "loss", losses['train'], iter_num)
-            task.get_logger().report_scalar("val_loss", "loss", losses['val'], iter_num)
-            task.get_logger().report_scalar("lr", "lr", lr, iter_num)
-            task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
-            task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        metrics = estimate_loss_with_metrics(model, ctx)
+
+        if wandb_log:
+            # FIXED: Access nested dictionary values
+            print(f"step {iter_num}: train loss {metrics['train']['loss']:.4f}, val loss {metrics['val']['loss']:.4f}")
+            print(f"  train ppl: {metrics['train']['perplexity']:.4f}, val ppl: {metrics['val']['perplexity']:.4f}")
+            print("logging")
+
+            if master_process:
+                # Loss metrics
+                task.get_logger().report_scalar("loss", "train", metrics['train']['loss'], iter_num)
+                task.get_logger().report_scalar("loss", "val", metrics['val']['loss'], iter_num)
+
+                # Perplexity metrics - FIXED
+                try:
+                    task.get_logger().report_scalar("perplexity", "train", metrics['train']['perplexity'], iter_num)
+                    task.get_logger().report_scalar("perplexity", "val", metrics['val']['perplexity'], iter_num)
+                except Exception as e:
+                    print(f"ERROR logging perplexity: {e}")
+
+                try:
+                    task.get_logger().report_scalar("token_accuracy", "train", metrics['train']['token_accuracy'], iter_num)
+                    task.get_logger().report_scalar("token_accuracy", "val", metrics['val']['token_accuracy'], iter_num)
+                except Exception as e:
+                    print(f"ERROR logging token_accuracy: {e}")
+
+                try:
+                    task.get_logger().report_scalar("top5_accuracy", "train", metrics['train']['top5_accuracy'], iter_num)
+                    task.get_logger().report_scalar("top5_accuracy", "val", metrics['val']['top5_accuracy'], iter_num)
+                except Exception as e:
+                    print(f"ERROR logging top5_accuracy: {e}")
+
+                    # Confidence - FIXED
+                    task.get_logger().report_scalar("confidence", "train", metrics['train']['mean_confidence'], iter_num)
+                    task.get_logger().report_scalar("confidence", "val", metrics['val']['mean_confidence'], iter_num)
+
+                    # Entropy - FIXED
+                    task.get_logger().report_scalar("entropy", "train", metrics['train']['entropy'], iter_num)
+                    task.get_logger().report_scalar("entropy", "val", metrics['val']['entropy'], iter_num)
+
+                    # Bits per character - FIXED
+                    task.get_logger().report_scalar("bits_per_char", "train", metrics['train']['bpc'], iter_num)
+                    task.get_logger().report_scalar("bits_per_char", "val", metrics['val']['bpc'], iter_num)
+
+                    # Learning rate and MFU
+                    task.get_logger().report_scalar("learning_rate", "lr", lr, iter_num)
+                    task.get_logger().report_scalar("model_flops_utilization", "mfu_percent", running_mfu*100, iter_num)
+
+
+            # Remove the redundant second part
+        if (metrics['val']['loss'] < best_val_loss) or always_save_checkpoint:
+            best_val_loss = metrics['val']['loss']
             # if iter_num > 0:
                 # 2. Save state dictionaries for BOTH optimizers
                 # checkpoint = {

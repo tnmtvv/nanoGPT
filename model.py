@@ -16,10 +16,14 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from adagram_optimizers.AdamGram import AdamGram, SymAdamGram, EQAdamGram, SVDAdamGram
+from adagram_optimizers.AdamGram import AdamGram, SymAdamGram, EQAdamGram, SVDAdamGram, AdamGramSqrt_PS, AdamGramSqrt_SVD
 from adagram_optimizers.AdaGram_eq import AdaGramEQ
 from adagram_optimizers.AdagramSVD import AdaGramFR
 from adagram_optimizers.SymAdaGram import SymAdaGram
+from adagram_optimizers.AdagramPS import AdaGramPS
+from adagram_optimizers.AdagramSqrtPS import AdaGramPS_Sqrt
+from adagram_optimizers.AdagramSqrtSVD import AdaGramFR_Sqrt
+
 # from adagram_optimizers.AdamGram import SymAdamGram
 
 
@@ -273,7 +277,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, opt_name='AdamW', rank=2):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, opt_name='AdamW', rank=2, alpha=None):
         # start with all of the candidate parameters
 
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -284,8 +288,12 @@ class GPT(nn.Module):
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
 
+        # optim_groups = [
+        #     {'params': decay_params, 'weight_decay': weight_decay},
+        #     {'params': nodecay_params, 'weight_decay': 0.0}
+        # ]
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': decay_params, 'weight_decay': 0.0},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
@@ -295,6 +303,21 @@ class GPT(nn.Module):
         print("optimizer", opt_name)
 
         if opt_name == 'AdaGram':
+            print("RANK", rank)
+            optimizer = AdaGramPS(optim_groups, lr=learning_rate, max_rank=rank, alpha=alpha)
+        if opt_name == 'AdaGramPS_Sqrt':
+            print("RANK", rank)
+            optimizer = AdaGramPS_Sqrt(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdaGramSVD_Sqrt':
+            print("RANK", rank)
+            optimizer = AdaGramFR_Sqrt(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdamGramSqrt_PS':
+            print("RANK", rank)
+            optimizer = AdamGramSqrt_PS(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdamGramSqrt_SVD':
+            print("RANK", rank)
+            optimizer = AdamGramSqrt_SVD(optim_groups, lr=learning_rate, max_rank=rank)
+        if opt_name == 'AdamGram':
             print("RANK", rank)
             optimizer = AdamGram(optim_groups, lr=learning_rate, max_rank=rank)
         if opt_name == 'SymAdaGram':
@@ -372,6 +395,7 @@ class GPT(nn.Module):
 
     def configure_two_optimizers(
         self,
+        opt_name,
         weight_decay,
         betas,
         lr_adagram: float = 0.001,
@@ -392,12 +416,30 @@ class GPT(nn.Module):
         num_non_matrix_params = sum(p.numel() for p in non_matrix_params)
         print(f"num matrix parameter tensors: {len(matrix_params)}, with {num_matrix_params:,} parameters")
         print(f"num non-matrix parameter tensors: {len(non_matrix_params)}, with {num_non_matrix_params:,} parameters")
+        
 
-        optimizer_adagram = SymAdamGram(
-            [{"params": matrix_params, "weight_decay": weight_decay}],
-            lr=lr_adagram,
-            max_rank=rank,
-        )
+        if opt_name == 'AdaGram':
+            print("AdaGram")
+            optimizer_adagram = AdamGram([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank)
+        if opt_name == 'SymAdaGram':
+            print("SymAdaGram")
+            optimizer_adagram = SymAdaGram([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank)
+        if opt_name == 'SymAdamGram':
+            print("SymAdamGram")
+            optimizer_adagram = SymAdamGram([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank)
+        if opt_name == 'AdaGramSVD':
+            print("AdaGramSVD")
+            optimizer_adagram = AdaGramFR([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank)
+        if opt_name == 'AdaGramEQ':
+            print("AdaGramEQ")
+            optimizer_adagram = AdaGramEQ([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank, enable_logging=False)
+        if opt_name == 'EQAdamGram':
+            print("EQAdamGram")
+            optimizer_adagram = EQAdamGram([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank, enable_logging=False)
+        if opt_name == 'SVDAdamGram':
+            print("SVDAdamGram")
+            optimizer_adagram = SVDAdamGram([{"params": matrix_params, "weight_decay": weight_decay}], lr=lr_adagram, max_rank=rank, enable_logging=False)
+        
         optimizer_adamw = torch.optim.AdamW(
             [{"params": non_matrix_params, "weight_decay": 0.0}],
             lr=lr_adamw,
